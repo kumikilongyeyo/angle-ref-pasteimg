@@ -1,0 +1,92 @@
+<!doctype html><meta charset="utf-8"><title>pose bench</title>
+<script src="../src/shared/constants.js"></script>
+<script src="../src/shared/math.js"></script>
+<script src="../src/pose/normalize-landmarks.js"></script>
+<script src="../src/pose/confidence.js"></script>
+<script src="../src/pose/landmarks-to-transforms.js"></script>
+<script src="../src/camera/projection-error.js"></script>
+<script src="../src/camera/camera-fitter.js"></script>
+<script type="module">
+import { configureScanner, scanPose, warmScanner, engine } from '../src/scanner/pose-scanner.mjs';
+configureScanner((p) => new URL('../' + p, location.href).href);
+window.bench = {
+  async warm() { await warmScanner(); return engine; },
+  /** scan one picture; returns the raw scan and derived numbers */
+  async run(url) {
+    const img = new Image(); img.src = url; await img.decode();
+    const bmp = await createImageBitmap(img);
+    const raw = await scanPose(bmp); bmp.close();
+    if (!raw) return { url, found: false };
+    return { url, found: true, raw, ...window.bench.measure(raw) };
+  },
+  measure(raw) {
+    const n = ARP.normalize.normalizeScan(raw);
+    const pose = ARP.solver.solvePose(n);
+    const fit = ARP.camera.fitCamera(n);
+    const w = Object.fromEntries(ARP.projection.ANCHORS.map((k) => [k, n.conf[k] >= 0.4 ? n.conf[k] : 0]));
+    const rot = ARP.camera.rotatePoints(n.points, fit.R);
+    const angBefore = ARP.projection.boneAngleError(n.points, n.img, n.conf).mean;
+    const angAfter = ARP.projection.boneAngleError(rot, n.img, n.conf).mean;
+    const tiers = Object.fromEntries(Object.entries(pose.bones).map(([k, v]) => [k, v.tier]));
+    return { people: raw.people, ms: raw.ms, reliable: ARP.confidence.reliableCount(n.conf), torso: +pose.torso.conf.toFixed(2), useHips: pose.torso.useHips,
+      fwd: pose.torsoBasis[2].map((v) => +v.toFixed(2)), projBefore: +fit.before.toFixed(4), projAfter: +fit.after.toFixed(4), ypr: fit.ypr,
+      angBefore: +(angBefore * 57.3).toFixed(1), angAfter: +(angAfter * 57.3).toFixed(1), tiers,
+      faceVis: +(['nose','leftEye','rightEye','mouthLeft','mouthRight'].reduce((s, k) => s + (raw.landmarks[ARP.constants.LM[k]].visibility), 0) / 5).toFixed(2) };
+  },
+  /** overlay picture for contact sheets */
+  async overlay(url, raw, label) {
+    const img = new Image(); img.src = url; await img.decode();
+    const H = 260, k = H / img.naturalHeight, W = Math.round(img.naturalWidth * k);
+    const c = document.createElement('canvas'); c.width = W; c.height = H + 34;
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, W, H);
+    if (raw) {
+      const n = ARP.normalize.normalizeScan(raw); const pose = ARP.solver.solvePose(n);
+      const px = (p) => [(p[0] / n.aspect + 0.5) * W, (0.5 - p[1]) * H];
+      const L = [['leftShoulder','rightShoulder'],['leftHip','rightHip'],['leftShoulder','leftHip'],['rightShoulder','rightHip'],['neckMid','nose'],
+        ['leftShoulder','leftElbow','leftUpperArm'],['leftElbow','leftWrist','leftLowerArm'],['rightShoulder','rightElbow','rightUpperArm'],['rightElbow','rightWrist','rightLowerArm'],
+        ['leftHip','leftKnee','leftThigh'],['leftKnee','leftAnkle','leftCalf'],['rightHip','rightKnee','rightThigh'],['rightKnee','rightAnkle','rightCalf']];
+      for (const [a, b, bone] of L) {
+        const t = bone ? pose.bones[bone].tier : 'sure';
+        // left side cyan, right side magenta so a left/right swap is visible
+        const side = (a + (b||'')).includes('left') ? '#00c8ff' : (a + (b||'')).includes('right') ? '#ff3cc8' : '#ffe14d';
+        g.strokeStyle = t === 'weak' ? '#888' : side; g.lineWidth = t === 'sure' ? 3 : 1.5; g.setLineDash(t === 'unsure' ? [4, 3] : []);
+        const [x1, y1] = px(n.img[a]), [x2, y2] = px(n.img[b]); g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
+      }
+    }
+    g.setLineDash([]); g.fillStyle = '#000'; g.font = '11px monospace';
+    label.split('\n').forEach((l, i) => g.fillText(l, 3, H + 13 + i * 12));
+    return c.toDataURL('image/png');
+  },
+};
+// ---- AngleRef catalog comparison: our pose vs the pose AngleRef stored for the same photo
+const quatBasis = ([x, y, z, w]) => [[1 - 2 * (y * y + z * z), 2 * (x * y + z * w), 2 * (x * z - y * w)], [2 * (x * y - z * w), 1 - 2 * (x * x + z * z), 2 * (y * z + x * w)], [2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y)]];
+const refDirs = (jd) => Array.from({ length: 14 }, (_, i) => { const v = [jd[i * 3] / 127, jd[i * 3 + 1] / 127, jd[i * 3 + 2] / 127]; return ARP.math.len(v) < 0.5 ? null : ARP.math.norm(v); });
+const SWAP = [0, 1, 5, 6, 7, 2, 3, 4, 11, 12, 13, 8, 9, 10];
+window.bench.compare = (raw, ref, variant = 'world') => {
+  const { angle } = ARP.math;
+  const n = ARP.normalize.normalizeScan(raw);
+  let pose = ARP.solver.solvePose(n);
+  if (variant === 'fit') pose = ARP.camera.rotatePose(pose, ARP.camera.fitCamera(n).R);
+  if (variant === 'lift') pose = ARP.camera.liftPose(n, pose, [[1, 0, 0], [0, 1, 0], [0, 0, 1]]);
+  if (variant === 'liftfit') { const R = ARP.camera.fitCamera(n).R; pose = ARP.camera.liftPose(n, ARP.camera.rotatePose(pose, R), R); }
+  const theirs = refDirs(ref.jointDirs), tb = quatBasis(ref.torsoQuat);
+  const D = (r) => (r * 180) / Math.PI;
+  const per = {}; let sum = 0, cnt = 0, sumSw = 0;
+  for (const b of ARP.constants.BONES) {
+    if (!b.bone) continue;
+    const o = pose.camDirs[b.i], t = theirs[b.i], ts = theirs[SWAP[b.i]];
+    if (!t || ARP.math.len(o) < 0.5) continue;
+    const a = D(angle(o, t)); per[b.bone] = +a.toFixed(1); sum += a; cnt++;
+    if (ts) sumSw += D(angle(o, ts));
+  }
+  // the same person? compare our 2D shoulders/hips with theirs
+  const il = ref.imageLandmarks; const ours = raw.landmarks;
+  const same = [11, 12, 23, 24].reduce((s, i) => s + Math.hypot(ours[i].x - il[i][0], ours[i].y - il[i][1]), 0) / 4;
+  // per-bone error against the raw picture direction, with that bone's confidence
+  const raw3 = ARP.solver.boneDirs(n.points);
+  const byConf = ARP.constants.BONES.filter((b) => b.bone && theirs[b.i]).map((b) => { const ev = ARP.constants.BONE_EVIDENCE[b.bone].map((k) => raw.landmarks[ARP.constants.LM[k]]); const inside = ev.every((p) => p.x > -0.02 && p.x < 1.02 && p.y > -0.02 && p.y < 1.02); const vis = Math.min(...ev.map((p) => p.visibility)); return [+ARP.confidence.boneConfidence(n.conf, b.bone).toFixed(3), +D(angle(raw3[b.i], theirs[b.i])).toFixed(1), b.bone, inside, +vis.toFixed(3)]; });
+  return { byConf, mean: +(sum / Math.max(cnt, 1)).toFixed(1), swapped: +(sumSw / Math.max(cnt, 1)).toFixed(1), bones: cnt, per,
+    torsoFwd: +D(angle(pose.torsoBasis[2], tb[2])).toFixed(1), torsoUp: +D(angle(pose.torsoBasis[1], tb[1])).toFixed(1), same2d: +same.toFixed(3) };
+};
+window.benchReady = true;
+</script>

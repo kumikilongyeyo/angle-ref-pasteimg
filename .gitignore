@@ -1,0 +1,8 @@
+node_modules/
+tests/fixtures/images/
+tests/e2e/out/
+bench/out/
+dist/
+*.zip
+.DS_Store
+bench/catalog/

@@ -1,0 +1,62 @@
+{
+  "manifest_version": 3,
+  "name": "AngleRef Pose Scanner",
+  "version": "0.1.0",
+  "description": "Paste a pose reference on AngleRef Bodies and the 3D skeleton takes the pose (and optionally the camera angle). Runs locally.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "offscreen"
+  ],
+  "host_permissions": [
+    "https://angleref.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Pose scanner",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://angleref.com/*"
+      ],
+      "js": [
+        "src/angleref/angleref-driver.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://angleref.com/*"
+      ],
+      "js": [
+        "src/content/flags.js",
+        "src/shared/constants.js",
+        "src/shared/math.js",
+        "src/pose/normalize-landmarks.js",
+        "src/pose/confidence.js",
+        "src/pose/landmarks-to-transforms.js",
+        "src/angleref/bridge.js",
+        "src/content/dock-ui.js",
+        "src/content/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}
